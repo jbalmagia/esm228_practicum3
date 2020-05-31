@@ -1,0 +1,200 @@
+---
+title: "Practicum 3"
+author: "Jenny Balmagia, Anthony Luna, Hope Cupples"
+date: "May 27, 2020"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(DeclareDesign)
+library(truncnorm) #for truncated distribution
+library(knitr)
+library(ggplot2)
+library(kableExtra)
+```
+
+##declare_population()
+
+```{r population, echo=TRUE}
+set.seed(228)
+population <- declare_population(
+  households = add_level(N=1000000,
+    kwh = rnorm(n=N, mean = 550, sd = 75),
+    u=rnorm(n=N, mean= 0.75, sd= 0.1)) #25% reduction w/ 10% sd due to retrofit 
+)
+
+pop <- population()
+
+#1,000,000 is an estimate of the number of households in the bay area, kwh is a distribution of household energy usage per month (Kwh) and u is the estimated percent change in energy usage from baseline due to retrofits - not including the pledge, which is the treatment. 
+
+
+te <- 0.97 #Taking the pledge will result in an additional 3% reduction in energy usage per month
+samp_size <- 5000 #half of the households recieving retrofits will also be asked to take the pledge
+
+potential_outcomes <- 
+  declare_potential_outcomes(
+    Y_D_0=kwh*u,
+    Y_D_1= kwh*u*te)#Multiplied TE since it is also a % reduction, not a fixed number of KwH
+
+po <- potential_outcomes(pop)
+kable(po[1:5,], digits=1)
+
+sampling <- declare_sampling(n=samp_size)
+sam <- sampling(po)
+kable(sam[1:5,c(1:2,4:6)], row.names = FALSE,
+      digits = 1)
+
+assigning <- declare_assignment(prob = 0.5,
+                  assignment_variable="D")
+assigned <- assigning(sam)
+kable(assigned[1:5,c(1:2,4:5,7:8)], 
+      digits = 1)
+
+ggplot(data=assigned, aes(x=as.factor(D), y=kwh)) +
+geom_violin(aes(fill=as.factor(D), color=as.factor(D))) +
+theme_minimal(base_size = 24) + xlab("Assignment")
+
+revealing <- declare_reveal(assignment_variables=D)
+
+estimand <- declare_estimand(ATE = te)
+estimand(po)
+
+dim <- declare_estimator(Y ~ D, estimand = estimand,  
+          model =  difference_in_means, label = "DIM")
+
+did <- declare_estimator(Y - kwh ~ D, 
+                         estimand = estimand,  
+          model =  difference_in_means, label = "DID")
+
+design <- population + potential_outcomes + sampling +
+          assigning + revealing + estimand + did
+
+diagnosis <- diagnose_design(design, sims=100)
+diagnosis$diagnosands_df[,c(1,3,5,9,11)] %>%
+  kable()
+```
+
+
+
+##declare_sampling()
+
+Next, we want to select the sample size. Let's start with 100 villages (recall that the actual study used 120 villages)
+
+```{r sample, echo=TRUE}
+sampling <- declare_sampling(n=5000)
+sam <- sampling(po)
+kable(sam[1:5,c(1:2,4:6)], row.names = FALSE,
+      digits = 1)
+```
+
+##declare_assignment()
+
+This step declares the random assignment process. There are many complexities, but let's stick to *complete assignment* of exactly half the units at this stage.
+
+```{r assign, echo=TRUE}
+assigning <- declare_assignment(m = nrow(sam)/2,
+                  assignment_variable="D")
+assigned <- assigning(sam)
+kable(assigned[1:5,c(1:2,4:5,7:8)], 
+      digits = 1)
+
+#PH: alright, now we're using DeclareDesign to randomly assign villages to treatment and control with a probability of 0.5. The variable 'm' denotes the number of units that declare_assignment() should place in each treatment condition, which we are asking to be equal to half of the sample per treatment condition (nrow(sam)/2).
+
+```
+
+
+## Assessing balance
+
+At this stage, it's possible to look at balance in the baseline tree cover characteristics, since random assignment has occured.
+
+```{r violin, echo=FALSE, fig.height=6}
+ggplot(data=assigned, aes(x=as.factor(D), y=wqi)) +
+geom_violin(aes(fill=as.factor(D), color=as.factor(D))) +
+theme_minimal(base_size = 24) + xlab("Assignment")
+
+#PH: recall that random assignment should, in expectation, produce treatment and control groups that are statistically-identical on all observed and unobserved features.
+```
+
+##declare_reveal()
+
+This step declares how the potential outcomes are revealed by the random assignment
+
+```{r reveal, echo=TRUE}
+revealing <- declare_reveal(assignment_variables=D)
+#PH: this part of DeclareDesign essentially is telling R which PO to reveal for each unit as a function of its treatment assignment. Recall that we calculated the full schedule of potential outcomes for each unit above.
+```
+
+##declare_estimand()
+
+At this stage, we specify our target *estimand*, which is the quantity that we are trying to recover when estimating impact. Recall that we set this value to **5.5** in line with Jayachandran et al. (2017).
+
+```{r estimand, echo=TRUE}
+estimand <- declare_estimand(ATE = -0.19)
+estimand(po)
+```
+
+
+##declare_estimator()
+
+Next, we declare the estimators we use for recovering the estimand. While there are many advanced estimators, we'll focus on the two core experimental estimators:
+1. difference-in-means
+2. difference-in-differences
+
+```{r estimator, echo=TRUE}
+dim <- declare_estimator(Y ~ D, estimand = estimand,  
+          model =  difference_in_means, label = "DIM") #PH: Difference-in-means (Mean of treatment group - mean of control group)
+
+did <- declare_estimator(Y - wqi ~ D, 
+                         estimand = estimand,  
+          model =  difference_in_means, label = "DID") #PH: Difference-in-differences ([Mean of treatment group @ endline - Mean of treatment group @ baseline] - [Mean of control group @ endline - mean of control group @ baseline])
+```
+
+
+##declare_design()
+
+This function brings all of the parts of the process together in a single design and allows for each part of the design to be simulated repeatedly.
+
+```{r design, echo=TRUE}
+design <- population + potential_outcomes + sampling +
+          assigning + revealing + estimand + dim + did
+```
+
+
+##diagnose_design()
+
+At this stage, we can calculate various features of the design that we have specified
+
+```{r diagnosis, cache=TRUE}
+diagnosis <- diagnose_design(design, sims=500)
+diagnosis$diagnosands_df[,c(1,3,5,9,11)] %>%
+  kable()
+```
+
+
+## Looking under the hood, DIM
+
+```{r underhood-dim, height=6}
+sim.out <- diagnosis$simulations
+hist(sim.out$estimate[sim.out$estimator_label=="DIM"],
+     main="Randomization Distribution",
+     xlab="Estimates in Realized Experiments",
+     xlim=c(-2,2), cex=24)
+abline(v=-0.19, lwd=3, col="red", add=T)
+```
+
+## Looking under the hood, DID
+
+```{r underhood-did, height=6}
+sim.out <- diagnosis$simulations
+hist(sim.out$estimate[sim.out$estimator_label=="DID"],
+     main="Randomization Distribution",
+     xlab="Estimates in Realized Experiments",
+     xlim=c(-2,2), cex=24)
+abline(v=-0.19, lwd=3, col="red")
+
+#PH: note that we get more power using the difference in differences estimation. This is because diff-in-diff increases the precision of our estimate of the ATE.
+```
+
